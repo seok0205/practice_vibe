@@ -1,0 +1,23 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ "release" ]
+  pull_request:
+    branches: [ "develop", "release" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run a one-line script
+        run: echo "Hello, GitHub Actions!"
+
+      - name: Run build and tests
+        run: |
+          echo "빌드 및 테스트를 진행합니다."
+          echo "seok"
