@@ -1,0 +1,59 @@
+# ==============================================================================
+# [파일 목적]
+# 로컬 환경에서 Kubernetes에 배포하기 전, Vibe Lotto 6/45 풀스택 컨테이너와
+# MySQL 8.0 데이터베이스 컨테이너를 한 번에 띄워 통합 검증하기 위한 Docker Compose 설정입니다.
+#
+# [아키텍처 내 역할]
+# - `mysql`: `vibe_lotto` 데이터베이스를 구동하며, 헬스체크(`mysqladmin ping`)를 통해
+#   DB가 완전히 준비된 후에만 `vibe-lotto-app`이 연결되도록 제어합니다.
+# - `vibe-lotto-app`: Multi-stage `Dockerfile`로 빌드된 FastAPI + React 컨테이너입니다.
+# ==============================================================================
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: vibe-lotto-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_secret_password
+      MYSQL_DATABASE: vibe_lotto
+      MYSQL_USER: lotto_user
+      MYSQL_PASSWORD: lotto_pass
+    ports:
+      - "3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ulotto_user", "-plotto_pass"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  vibe-lotto-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vibe-lotto-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      APP_NAME: "Vibe Lotto 6/45"
+      APP_VERSION: "1.0.0"
+      APP_ENV: "local-compose"
+      LOTTO_STORAGE_BACKEND: "mysql"
+      DB_HOST: "mysql"
+      DB_PORT: "3306"
+      DB_USER: "lotto_user"
+      DB_PASSWORD: "lotto_pass"
+      DB_NAME: "vibe_lotto"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+
