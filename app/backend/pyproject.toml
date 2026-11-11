@@ -1,0 +1,64 @@
+# ==============================================================================
+# [파일 목적]
+# Vibe Lotto 6/45 FastAPI 백엔드 프로젝트의 패키지 메타데이터, 의존성 목록(MySQL 연동 포함),
+# 그리고 정적 분석/테스트 도구(pytest, ruff, mypy) 설정을 정의하는 파일입니다.
+#
+# [아키텍처 내 역할]
+# - Python 표준 패키징 규격(PEP 621)을 준수하여 재현 가능한 빌드 환경을 구성합니다.
+# - MySQL 8.0 연동을 위해 SQLAlchemy 2.0(Typed ORM)과 순수 파이썬 드라이버인 PyMySQL을 사용합니다.
+# ==============================================================================
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vibe-lotto-backend"
+version = "1.0.0"
+description = "Vibe Lotto 6/45 FastAPI Backend with MySQL, DDD & OOP Design Patterns"
+readme = "../README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.110.0,<1.0.0",
+    "uvicorn[standard]>=0.29.0,<1.0.0",
+    "pydantic>=2.6.0,<3.0.0",
+    "sqlalchemy>=2.0.28,<3.0.0",
+    "pymysql>=1.1.0,<2.0.0",
+    "cryptography>=42.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+    "ruff>=0.4.0",
+    "mypy>=1.9.0",
+]
+
+# ------------------------------------------------------------------------------
+# Pytest 설정: 테스트 탐색 경로 및 기본 실행 옵션
+# ------------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --tb=short"
+
+# ------------------------------------------------------------------------------
+# Ruff 설정: PEP 8 준수, 최대 줄 길이 100자, Import 정렬(I), 버그 예방(B)
+# ------------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM"]
+
+# ------------------------------------------------------------------------------
+# Mypy 설정: `Any` 사용 금지 및 엄격한 정적 타입 검사
+# ------------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.9"
+strict = true
+disallow_any_generics = true
+warn_return_any = true
+warn_unused_configs = true
