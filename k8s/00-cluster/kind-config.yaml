@@ -1,0 +1,77 @@
+# ==============================================================================
+# [파일 목적]
+# 로컬 Docker 환경에서 멀티 노드(Multi-node) Kubernetes 클러스터를 구축하기 위한
+# Kind(Kubernetes IN Docker) 설정 매니페스트입니다.
+#
+# [아키텍처 내 역할]
+# - 일반적인 로컬 도구(Minikube 기본값, Docker Desktop 내장 K8s)는 단일 노드(1 Node)로 동작하여
+#   실무 및 CKA 시험의 핵심인 노드 간 스케줄링(nodeSelector, Affinity, Taint/Toleration),
+#   노드 장애 유지보수(cordon, drain), DaemonSet, Pod 간 크로스-노드 통신을 실습할 수 없습니다.
+# - 따라서 이 파일은 Control Plane 1대 + Worker Node 2대(총 3대)의 실제 클러스터 토폴로지를
+#   가벼운 Docker 컨테이너들로 에뮬레이션합니다.
+#
+# [연관 리소스]
+# - 추후 Phase 1 Module 4(Ingress Controller)에서 호스트의 80/443 포트를 통해
+#   클러스터 내부의 웹 애플리케이션으로 트래픽을 라우팅할 때 이 설정의 extraPortMappings가 사용됩니다.
+# ==============================================================================
+
+# kind: 이 설정 파일이 Kind 클러스터 생성을 위한 리소스임을 명시합니다.
+kind: Cluster
+
+# apiVersion: Kind 설정 스키마 버전입니다. (현재 표준 안정 버전은 kind.x-k8s.io/v1alpha4)
+apiVersion: kind.x-k8s.io/v1alpha4
+
+# name: 생성될 클러스터의 기본 이름입니다.
+# 생략 시 기본값(Default)은 'kind'이며, 생성 후 kubectl context 이름은 'kind-<name>'(여기서는 'kind-vibe-cluster')이 됩니다.
+name: vibe-cluster
+
+# nodes: 클러스터를 구성할 가상 노드(Docker 컨테이너)들의 목록을 정의합니다.
+# 생략 시 기본값(Default)은 control-plane 노드 1개만 생성됩니다.
+nodes:
+  # ----------------------------------------------------------------------------
+  # 1. Control Plane 노드 (마스터 노드)
+  # 역할: kube-apiserver, etcd, kube-scheduler, kube-controller-manager가 구동되며
+  #       클러스터의 두뇌 역할을 수행합니다.
+  # CKA 주의점: 기본적으로 Control Plane 노드에는 'node-role.kubernetes.io/control-plane:NoSchedule'
+  #             Taint가 자동으로 설정되어 일반 애플리케이션 Pod가 배치되지 않습니다.
+  # ----------------------------------------------------------------------------
+  - role: control-plane
+    # kubeadmConfigPatches: Kind가 내부적으로 클러스터를 부트스트랩할 때 사용하는 kubeadm 설정을 패치합니다.
+    # 여기서는 추후 NGINX Ingress Controller가 이 노드에 스케줄링될 수 있도록 커스텀 라벨(ingress-ready=true)을 부여합니다.
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    # extraPortMappings: 내 Mac(Host)의 포트와 Kind 노드(Container)의 포트를 연결(Port Forwarding)합니다.
+    # 이를 통해 `kubectl port-forward` 없이도 Mac 브라우저에서 `http://localhost:80`으로 Ingress 테스트가 가능해집니다.
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+
+  # ----------------------------------------------------------------------------
+  # 2. 첫 번째 Worker 노드 (워커 노드 1)
+  # 역할: kubelet과 kube-proxy가 구동되며, 실제 사용자가 배포하는 애플리케이션 Pod들이 실행됩니다.
+  # ----------------------------------------------------------------------------
+  - role: worker
+    # labels: 노드에 초기 라벨을 부여합니다.
+    # 추후 Module 3(Scheduling)에서 특정 워크로드를 특정 노드에 배치하는 nodeSelector / nodeAffinity 실습에 활용됩니다.
+    labels:
+      tier: frontend
+      zone: ap-northeast-2a
+
+  # ----------------------------------------------------------------------------
+  # 3. 두 번째 Worker 노드 (워커 노드 2)
+  # 역할: 고가용성(HA, High Availability) 분산 배치(podAntiAffinity) 및
+  #       노드 업그레이드/유지보수 시 파드 퇴거(`kubectl drain`)를 실습하기 위한 두 번째 워커 노드입니다.
+  # ----------------------------------------------------------------------------
+  - role: worker
+    labels:
+      tier: backend
+      zone: ap-northeast-2c
+
