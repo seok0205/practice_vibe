@@ -1,0 +1,171 @@
+# ==============================================================================
+# [파일 목적]
+# Vibe Lotto 6/45의 5등 이상 당첨 기록(`lotto_winning_records` 테이블)을 저장할
+# MySQL 8.0 데이터베이스 워크로드 및 내부 통신용 ClusterIP Service 매니페스트입니다.
+#
+# [아키텍처 내 역할]
+# - `PersistentVolumeClaim (mysql-pvc)`: MySQL 파드가 재시작되거나 다른 노드로 스케줄링되어도
+#   데이터(`/var/lib/mysql`)가 날아가지 않도록 영구 디스크 볼륨(1Gi)을 동적으로 할당받습니다.
+# - `Deployment (mysql)`: MySQL 8.0 컨테이너를 구동하며, `01-config-and-secret.yaml`의
+#   시크릿 값을 환경변수로 주입받아 초기 데이터베이스(`vibe_lotto`)와 유저 계정을 자동 생성합니다.
+# - `Service (mysql-service)`: 파드 IP가 바뀌어도 백엔드 파드들이 항상 고정된 DNS 주소인
+#   `mysql-service:3306`으로 접속할 수 있도록 클러스터 내부 전용 단일 진입점(ClusterIP)을 제공합니다.
+#
+# [실무 & CKA 주의점]
+# - 데이터베이스처럼 하나의 볼륨에 상태를 기록하는 워크로드는 동시에 여러 파드가 같은 파일시스템을
+#   건드리면 데이터가 손상될 수 있으므로 `replicas: 1` 및 배포 전략을 `strategy.type: Recreate`
+#   (기존 파드를 완전히 내린 후 새 파드 기동, 기본값은 RollingUpdate)로 설정합니다.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. PersistentVolumeClaim (PVC) - MySQL 영구 데이터 볼륨 요청
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: mysql
+spec:
+  # accessModes: 볼륨 마운트 읽기/쓰기 권한 모드입니다.
+  # - ReadWriteOnce (RWO): 단일 노드에서만 읽기/쓰기 마운트 허용 (블록 스토리지 표준)
+  # - ReadOnlyMany (ROX): 여러 노드에서 읽기 전용 마운트 허용
+  # - ReadWriteMany (RWX): 여러 노드에서 동시에 읽기/쓰기 마운트 허용 (NFS, AWS EFS 등)
+  accessModes:
+    - ReadWriteOnce
+  # storageClassName: 생략 시 클러스터의 기본(Default) StorageClass(Kind에서는 'standard' local-path)가 자동 선택됩니다.
+  resources:
+    requests:
+      # storage: 요청할 디스크 용량입니다.
+      storage: 1Gi
+---
+# ------------------------------------------------------------------------------
+# 2. MySQL Deployment - 데이터베이스 파드 관리
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: mysql
+    tier: database
+spec:
+  # replicas: 실행할 파드 개수입니다. (생략 시 기본값은 1)
+  replicas: 1
+  # strategy: 파드 업데이트 전략입니다.
+  # 생략 시 기본값(Default)은 'RollingUpdate'이나, 단일 RWO 볼륨을 마운트하는 DB의 경우
+  # 기존 파드를 먼저 종료한 뒤 새 파드를 띄우는 'Recreate'를 사용해야 볼륨 잠금 충돌을 방지할 수 있습니다.
+  strategy:
+    type: Recreate
+  # selector: 이 Deployment가 관리할 대상 파드를 찾는 라벨 조건입니다.
+  # 주의: 아래 template.metadata.labels와 반드시 일치해야 합니다!
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+      tier: database
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql
+        tier: database
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          # imagePullPolicy: 이미지 다운로드 정책입니다.
+          # 태그가 ':latest'가 아니면 생략 시 기본값은 'IfNotPresent'(노드에 없을 때만 Pull)입니다.
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--character-set-server=utf8mb4"
+            - "--collation-server=utf8mb4_unicode_ci"
+          ports:
+            - name: mysql-port
+              containerPort: 3306
+              protocol: TCP
+          # env: ConfigMap과 Secret에서 개별 키를 뽑아 MySQL 공식 이미지 환경변수에 매핑합니다.
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: vibe-lotto-config
+                  key: DB_NAME
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_PASSWORD
+          # resources: 스케줄러가 노드를 배정할 때 참고하는 최소 보장량(requests)과 최대 허용치(limits)입니다.
+          # CKA 주의점: 메모리가 limits를 초과하면 파드는 'OOMKilled' (Exit Code 137)로 강제 종료됩니다.
+          resources:
+            requests:
+              cpu: "150m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          # readinessProbe: MySQL 데몬이 초기화를 마치고 실제 TCP 3306 연결을 받을 준비가 되었는지 검사합니다.
+          # 통과하기 전까지 'mysql-service'의 Endpoint 목록에서 제외되어 백엔드가 미완성 DB에 붙는 것을 막습니다.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD"
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          # livenessProbe: MySQL 데몬이 행(Hang)이나 데드락에 빠져 응답 불능일 때 파드를 재시작합니다.
+          livenessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          # volumeMounts: 아래 volumes에서 선언한 PVC 볼륨을 컨테이너 내부 '/var/lib/mysql'에 마운트합니다.
+          volumeMounts:
+            - name: mysql-storage
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: mysql-storage
+          persistentVolumeClaim:
+            claimName: mysql-pvc
+---
+# ------------------------------------------------------------------------------
+# 3. MySQL Service (ClusterIP) - 클러스터 내부 전용 네트워크 엔드포인트
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: mysql
+spec:
+  # type: 서비스 노출 방식입니다. 생략 시 기본값(Default)은 'ClusterIP'(클러스터 내부에서만 접근 가능)입니다.
+  # 데이터베이스는 외부 인터넷에 직접 노출되면 보안상 위험하므로 반드시 ClusterIP로 설정합니다.
+  type: ClusterIP
+  # selector: 트래픽을 전달할 대상 파드들의 라벨입니다.
+  # CKA 트러블슈팅 1순위: Service가 동작하지 않을 때 `kubectl get endpoints mysql-service`를 확인하세요!
+  selector:
+    app.kubernetes.io/name: mysql
+    tier: database
+  ports:
+    - name: tcp-mysql
+      protocol: TCP
+      # port: Service 자체가 클러스터 내부에서 수신할 포트 번호
+      port: 3306
+      # targetPort: 실제 파드(컨테이너)가 열고 있는 포트 번호 (생략 시 port와 동일한 값으로 설정됨)
+      targetPort: 3306
+

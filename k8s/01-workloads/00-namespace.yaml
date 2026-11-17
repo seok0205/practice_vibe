@@ -1,0 +1,35 @@
+# ==============================================================================
+# [파일 목적]
+# Vibe Lotto 6/45 애플리케이션과 MySQL 데이터베이스 리소스들을 논리적으로 격리하기 위한
+# 전용 Namespace 매니페스트입니다.
+#
+# [아키텍처 내 역할]
+# - 단일 Kubernetes 클러스터 내에서 여러 팀이나 환경(dev, staging, prod), 또는 프로젝트를
+#   분리하여 리소스 이름 충돌을 방지하고 접근 권한(RBAC) 및 리소스 쿼터(ResourceQuota)의
+#   경계로 활용합니다.
+# - 클러스터 내부 DNS(CoreDNS)에서 `<service-name>.vibe-lotto.svc.cluster.local` 도메인의
+#   기준 단위가 됩니다.
+#
+# [CKA 시험 포인트]
+# - 명령형(Imperative) 생성 단축 명령어:
+#   `kubectl create namespace vibe-lotto --dry-run=client -o yaml > 00-namespace.yaml`
+# - 특정 네임스페이스를 기본 컨텍스트로 고정하는 명령어(시험 시간 단축 필수 팁!):
+#   `kubectl config set-context --current --namespace=vibe-lotto`
+# ==============================================================================
+
+# apiVersion: Namespace는 Kubernetes 코어(Core) API 그룹에 속하므로 그룹명 없이 'v1'을 사용합니다.
+apiVersion: v1
+
+# kind: 생성할 리소스 종류를 지정합니다.
+kind: Namespace
+
+# metadata: 리소스의 이름, 라벨(Labels), 어노테이션(Annotations) 등 식별 정보를 정의합니다.
+metadata:
+  # name: 네임스페이스의 고유 이름입니다.
+  name: vibe-lotto
+  # labels: 추후 NetworkPolicy(namespaceSelector)나 모니터링 도구에서 이 네임스페이스를
+  #         식별할 수 있도록 표준 라벨을 부여합니다.
+  labels:
+    app.kubernetes.io/part-of: vibe-lotto
+    environment: dev
+
