@@ -1,0 +1,241 @@
+# ==============================================================================
+# [파일 목적]
+# Kubernetes 스케줄러(`kube-scheduler`)가 파드를 어느 워커 노드에 배치할지 정밀하게 제어하는
+# `nodeAffinity`, `podAntiAffinity`(고가용성 분산 배치), 그리고 `tolerations` 실습 매니페스트입니다.
+#
+# [아키텍처 내 역할 & 왜 필요한가?]
+# 1. `nodeAffinity` (노드 친화성):
+#    - 특정 하드웨어(예: GPU 노드, SSD 노드)나 특정 가용영역(`zone: ap-northeast-2a`, `tier: backend`)에만
+#      파드를 배치하고 싶을 때 사용합니다.
+# 2. `podAntiAffinity` (파드 반친화성 - 실무 HA 핵심!):
+#    - `replicas: 2`로 띄웠는데 만약 2개 파드가 모두 같은 워커 노드(`vibe-cluster-worker`)에 몰려서 배정되면,
+#      그 노드 1대가 다운될 때 서비스 전체가 죽어버립니다(Single Point of Failure).
+#    - `podAntiAffinity`를 설정하면 동일한 앱 파드끼리 서로 다른 노드(`kubernetes.io/hostname` 기준)로
+#      무조건 찢어져서 배치되도록 보장합니다.
+#
+# [CKA 시험 필수 암기 키워드]
+# - `requiredDuringSchedulingIgnoredDuringExecution` (Hard 조건):
+#   스케줄링 시점에 조건을 만족하는 노드가 없으면 파드를 띄우지 않고 `Pending` 상태로 둡니다.
+# - `preferredDuringSchedulingIgnoredDuringExecution` (Soft 조건):
+#   조건을 만족하는 노드를 선호하되, 자리가 없으면 다른 노드라도 배정하여 파드를 무조건 실행시킵니다.
+# - 왜 둘 다 뒤에는 `IgnoredDuringExecution`이 붙을까?
+#   이미 파드가 노드에 떠서 실행 중(DuringExecution)일 때는 노드의 라벨이 나중에 바뀌더라도
+#   실행 중인 파드를 강제로 쫓아내지(Evict) 않는다는 뜻입니다!
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. MySQL을 'tier=backend' 라벨이 붙은 전용 워커 노드(vibe-cluster-worker2)에 고정 배치
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: mysql
+    tier: database
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+      tier: database
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql
+        tier: database
+    spec:
+      # ------------------------------------------------------------------------
+      # affinity.nodeAffinity: MySQL 파드는 반드시 'tier=backend' 라벨이 있는 노드에만 스케줄링합니다.
+      # (Module 1의 kind-config.yaml에서 vibe-cluster-worker2 노드에 tier=backend를 부여했었습니다!)
+      # ------------------------------------------------------------------------
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: tier
+                    # operator: In, NotIn, Exists, DoesNotExist, Gt, Lt 사용 가능
+                    operator: In
+                    values:
+                      - backend
+      # ------------------------------------------------------------------------
+      # tolerations: 추후 우리가 vibe-cluster-worker2 노드에 'dedicated=database:NoSchedule'
+      #              Taint(오염)를 걸어 일반 파드들의 진입을 막더라도, MySQL 파드는 이를 견디고(Tolerate)
+      #              정상 스케줄링될 수 있도록 통행증을 부여합니다.
+      # ------------------------------------------------------------------------
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "database"
+          effect: "NoSchedule"
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--character-set-server=utf8mb4"
+            - "--collation-server=utf8mb4_unicode_ci"
+          ports:
+            - name: mysql-port
+              containerPort: 3306
+              protocol: TCP
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: vibe-lotto-config
+                  key: DB_NAME
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_PASSWORD
+          resources:
+            requests:
+              cpu: "150m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD"
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: mysql-storage
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: mysql-storage
+          persistentVolumeClaim:
+            claimName: mysql-pvc
+---
+# ------------------------------------------------------------------------------
+# 2. Vibe Lotto App에 PodAntiAffinity(상호 분산 배치) 적용
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vibe-lotto-app
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: vibe-lotto-app
+    tier: backend
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vibe-lotto-app
+      tier: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vibe-lotto-app
+        tier: backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      # ------------------------------------------------------------------------
+      # affinity.podAntiAffinity: 동일한 'app.kubernetes.io/name=vibe-lotto-app' 라벨을 가진 파드가
+      # 이미 떠 있는 노드(topologyKey: kubernetes.io/hostname)에는 가급적 중복 배치하지 않도록 설정합니다.
+      # (RollingUpdate 시 maxSurge로 3번째 파드가 잠시 뜰 때 노드가 2대뿐이어도 Pending에 빠지지 않도록
+      #  preferredDuringScheduling을 사용하는 것이 실무 표준 베스트 프랙티스입니다!)
+      # ------------------------------------------------------------------------
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - vibe-lotto-app
+                topologyKey: "kubernetes.io/hostname"
+      initContainers:
+        - name: wait-for-mysql
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -v -w2 mysql-service 3306; do
+                echo "Waiting for MySQL..."
+                sleep 2
+              done
+      containers:
+        - name: vibe-lotto
+          image: vibe-lotto:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: vibe-lotto-config
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_PASSWORD
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+

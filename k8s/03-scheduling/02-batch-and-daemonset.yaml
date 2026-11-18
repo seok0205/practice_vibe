@@ -1,0 +1,200 @@
+# ==============================================================================
+# [파일 목적]
+# 지속 실행되는 서버(Deployment)가 아니라, 단발성 배치 작업(`Job`), 주기적 스케줄링 작업(`CronJob`),
+# 그리고 모든 노드에 1개씩 실행되는 시스템 에이전트(`DaemonSet`)를 실습하는 매니페스트입니다.
+#
+# [아키텍처 내 역할]
+# 1. `Job (lotto-stats-report)`:
+#    - MySQL(`mysql-service`)에 접속하여 현재까지 저장된 등수별(1등~5등) 당첨 통계 리포트를 출력하고
+#      정상 종료(`Completed`, `0/1`)되는 일회성 배치 작업입니다.
+# 2. `CronJob (lotto-periodic-audit)`:
+#    - 리눅스 crontab 표현식(`*/2 * * * *`: 2분마다 실행)에 따라 주기적으로 `Job`을 자동 생성하여
+#      누적 당첨 건수를 점검합니다.
+# 3. `DaemonSet (node-health-monitor)`:
+#    - `replicas` 설정 없이 클러스터 내 모든 워커 노드에 정확히 1개씩의 파드를 자동 배치합니다.
+#      (실무에서는 FluentBit/Promtail 로그 수집기, Node Exporter 모니터링 에이전트, CNI 네트워크 플러그인에 사용)
+#
+# [CKA 시험 포인트]
+# - Job/CronJob의 `restartPolicy`는 절대 `Always`(Deployment 기본값)를 쓸 수 없으며,
+#   반드시 **`OnFailure`** 또는 **`Never`**로 지정해야 합니다!
+# - 명령형 생성 단축어:
+#   - Job: `kubectl create job my-job --image=busybox --dry-run=client -o yaml -- sh -c "echo hello"`
+#   - CronJob: `kubectl create cronjob my-cron --image=busybox --schedule="*/1 * * * *" --dry-run=client -o yaml -- sh -c "date"`
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Job: MySQL 당첨 등수별 통계 리포트 출력 (1회성 배치)
+# ------------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lotto-stats-report
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: lotto-stats-report
+spec:
+  # completions: 성공적으로 완료되어야 하는 총 파드 실행 횟수 (기본값: 1)
+  completions: 1
+  # parallelism: 동시에 병렬로 실행할 최대 파드 수 (기본값: 1)
+  parallelism: 1
+  # backoffLimit: 실패 시 재시도할 최대 횟수 (기본값: 6)
+  backoffLimit: 3
+  # activeDeadlineSeconds: 이 시간(초) 내에 작업이 끝나지 않으면 강제 종료 (무한 행 방지)
+  activeDeadlineSeconds: 60
+  template:
+    spec:
+      # CKA 필수: Job 파드는 작업이 끝나면 종료되어야 하므로 restartPolicy가 OnFailure 또는 Never여야 합니다.
+      restartPolicy: OnFailure
+      containers:
+        - name: mysql-reporter
+          image: mysql:8.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: vibe-lotto-config
+                  key: DB_HOST
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: vibe-lotto-config
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_PASSWORD
+          command:
+            - sh
+            - -c
+            - |
+              echo "=================================================="
+              echo " [Vibe Lotto 6/45] MySQL 당첨 통계 배치 리포트"
+              echo " 실행 시각: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+              echo "=================================================="
+              mysql -h "$DB_HOST" -u"$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" -t -e "
+                SELECT
+                  \`rank\` AS '당첨등수(1~5등)',
+                  COUNT(*) AS '당첨건수',
+                  MIN(created_at) AS '최초당첨시각',
+                  MAX(created_at) AS '최근당첨시각'
+                FROM lotto_winning_records
+                GROUP BY \`rank\`
+                ORDER BY \`rank\` ASC;
+              "
+              echo "=================================================="
+---
+# ------------------------------------------------------------------------------
+# 2. CronJob: 2분마다 누적 당첨 건수를 점검하는 정기 스케줄러
+# ------------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lotto-periodic-audit
+  namespace: vibe-lotto
+spec:
+  # schedule: 분(0-59) 시(0-23) 일(1-31) 월(1-12) 요일(0-6)
+  # '*/2 * * * *'는 매 2분마다 실행을 의미합니다.
+  schedule: "*/2 * * * *"
+  # successfulJobsHistoryLimit: 완료된 Job 이력을 몇 개까지 남겨둘지 설정 (기본값: 3)
+  successfulJobsHistoryLimit: 2
+  # failedJobsHistoryLimit: 실패한 Job 이력을 몇 개까지 남겨둘지 설정 (기본값: 1)
+  failedJobsHistoryLimit: 1
+  # concurrencyPolicy: 이전 주기 작업이 아직 안 끝났을 때의 정책
+  # - Allow (기본값): 동시 실행 허용
+  # - Forbid: 이전 작업이 끝날 때까지 이번 주기는 건너뜀 (실무 DB 배치에서 중복 실행 방지용으로 가장 많이 사용!)
+  # - Replace: 이전 작업을 취소하고 새 작업 실행
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: audit-checker
+              image: mysql:8.0
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: DB_HOST
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vibe-lotto-config
+                      key: DB_HOST
+                - name: DB_NAME
+                  valueFrom:
+                    configMapKeyRef:
+                      name: vibe-lotto-config
+                      key: DB_NAME
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: vibe-lotto-secret
+                      key: DB_USER
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: vibe-lotto-secret
+                      key: DB_PASSWORD
+              command:
+                - sh
+                - -c
+                - |
+                  TOTAL=$(mysql -h "$DB_HOST" -u"$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" -N -s -e "SELECT COUNT(*) FROM lotto_winning_records;")
+                  echo "[CronJob Audit] $(date -u '+%H:%M:%S UTC') - 현재 MySQL 누적 5등 이상 당첨 건수: ${TOTAL}건"
+---
+# ------------------------------------------------------------------------------
+# 3. DaemonSet: 모든 노드에 1개씩 자동 배포되는 노드 상태 모니터 에이전트
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-health-agent
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: node-health-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-health-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-health-agent
+    spec:
+      # 워커 노드에 어떤 Taint가 걸리더라도 모니터링 에이전트인 DaemonSet은 무조건 실행되어야 하므로
+      # 모든 NoSchedule Taint를 견디도록(operator: Exists) 설정합니다.
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+      containers:
+        - name: agent
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          env:
+            # Downward API: 파드가 실행 중인 노드의 이름(spec.nodeName)을 환경변수로 동적 주입받습니다!
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                echo "[NodeHealthAgent] Monitoring node=${NODE_NAME} at $(date -u '+%H:%M:%S UTC') - Status OK"
+                sleep 30
+              done
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+
