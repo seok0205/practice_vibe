@@ -56,10 +56,14 @@ spec:
         - podSelector:
             matchLabels:
               tier: backend
-        # 허용 그룹 2: Module 3에서 만든 통계 리포트 Job 파드 ('app.kubernetes.io/name: lotto-stats-report')
+        # 허용 그룹 2: Module 3에서 만든 통계 리포트 Job 파드 ('job-name: lotto-stats-report')
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: lotto-stats-report
+              job-name: lotto-stats-report
+        # 허용 그룹 3: Module 3에서 만든 2분 주기 감사 CronJob 파드 ('app.kubernetes.io/name: lotto-periodic-audit')
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: lotto-periodic-audit
       # 허용할 프로토콜 및 포트 번호 (TCP 3306 포트만 개방)
       ports:
         - protocol: TCP

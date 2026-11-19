@@ -114,6 +114,11 @@ spec:
   jobTemplate:
     spec:
       template:
+        metadata:
+          labels:
+            # Module 4의 NetworkPolicy(mysql-access-policy)가 허용할 수 있도록 명시적 라벨 부여!
+            app.kubernetes.io/name: lotto-periodic-audit
+            tier: batch-audit
         spec:
           restartPolicy: OnFailure
           containers:
