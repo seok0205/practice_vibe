@@ -1,0 +1,163 @@
+# ==============================================================================
+# [파일 목적]
+# Module 2에서 경험한 동적 프로비저닝(Dynamic Provisioning, `mysql-pvc`)과 대비되는
+# **정적 프로비저닝(Static Provisioning: 관리자가 PV를 먼저 생성 -> PVC가 바인딩)**을 실습하고,
+# MySQL의 5등 이상 당첨 데이터를 `.sql` 파일로 영구 백업하는 배치 `Job` 매니페스트입니다.
+#
+# [앞선 Module 0 ~ 4와의 충돌 방지 설계 (Cross-Module Compatibility)]
+# 1. `hostPath` 노드 불일치 방지 (`nodeAffinity` 연동):
+#    - `hostPath` 볼륨은 특정 워커 노드의 로컬 디스크(`/tmp/vibe-lotto-backups`)에 생성됩니다.
+#    - 따라서 이 볼륨을 사용하는 백업 파드와 검증 파드 모두 Module 0/3에서 설정한
+#      `vibe-cluster-worker2` (`tier: backend` 라벨 보유 노드, 현재 MySQL 파드가 떠 있는 노드)에
+#      스케줄링되도록 `nodeAffinity`와 `tolerations`를 동일하게 맞췄습니다.
+# 2. Module 4 `NetworkPolicy` (`mysql-access-policy`) 통과 보장:
+#    - MySQL(`3306`)에 접속해야 하는 백업 Job 파드의 템플릿(`spec.template.metadata.labels`)에
+#      `tier: backend` 및 `tier: batch-audit` 라벨을 명시하여 방화벽에 막히지 않고 즉시 덤프를 수행합니다.
+#
+# [CKA 시험 1순위 출제 포인트]
+# 1. PV와 PVC가 `Bound`(연결)되기 위한 3가지 필수 일치 조건:
+#    - `storageClassName`이 서로 정확히 일치해야 함 (정적 바인딩 시에는 보통 `manual` 또는 빈 문자열 `""` 사용)
+#    - `accessModes` (`ReadWriteOnce` 등)가 일치해야 함
+#    - PV의 `capacity.storage` >= PVC의 `resources.requests.storage` (PV 용량이 PVC 요청량 이상이어야 함)
+# 2. `persistentVolumeReclaimPolicy` (PVC 삭제 시 PV 데이터 처리 정책):
+#    - `Retain` (정적 PV 기본값): PVC를 지워도 PV와 실제 디스크 데이터는 삭제되지 않고 보존됨 (`Released` 상태가 됨)
+#    - `Delete` (동적 StorageClass 기본값): PVC를 지우면 PV와 실제 스토리지 데이터도 함께 자동 삭제됨
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. PersistentVolume (PV) - 클러스터 관리자가 물리/호스트 디스크를 미리 등록
+# 주의: PV는 네임스페이스에 속하지 않는 클러스터 전역(Cluster-scoped) 리소스입니다!
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: lotto-backup-pv
+  labels:
+    app.kubernetes.io/name: lotto-backup-pv
+    type: local-backup
+spec:
+  # storageClassName: 동적 프로비저너(standard)가 가로채지 않도록 'manual'로 지정합니다.
+  # 아래 PVC에서도 반드시 동일한 'manual'을 지정해야 이 PV와 1:1로 매칭됩니다!
+  storageClassName: manual
+  capacity:
+    storage: 500Mi
+  accessModes:
+    - ReadWriteOnce
+  # persistentVolumeReclaimPolicy: 백업 파일은 실수로 PVC를 지워도 날아가면 안 되므로 'Retain'(보존)으로 설정합니다!
+  persistentVolumeReclaimPolicy: Retain
+  # hostPath: 워커 노드(Docker 컨테이너) 내부의 '/tmp/vibe-lotto-backups' 디렉토리를 볼륨으로 사용합니다.
+  hostPath:
+    path: "/tmp/vibe-lotto-backups"
+    # DirectoryOrCreate: 노드에 해당 폴더가 없으면 kubelet이 자동으로 디렉토리를 생성(퍼미션 0755)해 줍니다.
+    type: DirectoryOrCreate
+---
+# ------------------------------------------------------------------------------
+# 2. PersistentVolumeClaim (PVC) - 사용자가 위에서 만든 정적 PV(500Mi 중 200Mi 요청)를 바인딩
+# 주의: PVC는 반드시 사용할 파드와 동일한 네임스페이스('vibe-lotto')에 생성해야 합니다!
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lotto-backup-pvc
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: lotto-backup-pvc
+spec:
+  # 위 PV의 storageClassName('manual')과 정확히 일치시킵니다.
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # PV 용량(500Mi) 이하를 요청하면 해당 PV와 즉시 'Bound' 됩니다.
+      storage: 200Mi
+---
+# ------------------------------------------------------------------------------
+# 3. MySQL 당첨 데이터 영구 백업(mysqldump) 배치 Job
+# 역할: MySQL에서 lotto_winning_records 테이블을 덤프하여 PVC(/backup/winning_records_backup.sql)에 저장합니다.
+# ------------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-backup-job
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: mysql-backup-job
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 60
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql-backup-job
+        # [중요] Module 4의 NetworkPolicy(mysql-access-policy)를 통과하기 위한 인가 라벨!
+        tier: backend
+    spec:
+      restartPolicy: OnFailure
+      # [중요] hostPath 볼륨이 항상 동일한 노드(vibe-cluster-worker2, tier=backend)의 디스크를 바라보도록 고정!
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: tier
+                    operator: In
+                    values:
+                      - backend
+      # Module 3에서 worker2 노드에 Taint를 걸었을 때도 정상 동작하도록 Toleration 포함
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "database"
+          effect: "NoSchedule"
+      containers:
+        - name: mysqldump-worker
+          image: mysql:8.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: vibe-lotto-config
+                  key: DB_HOST
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: vibe-lotto-config
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_PASSWORD
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              BACKUP_FILE="/backup/winning_records_backup.sql"
+              META_FILE="/backup/last_backup_info.txt"
+              echo "[1/3] Connecting to ${DB_HOST}:3306 and running mysqldump..."
+              mysqldump --no-tablespaces -h "$DB_HOST" -u"$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" lotto_winning_records > "$BACKUP_FILE"
+
+              ROW_COUNT=$(mysql -h "$DB_HOST" -u"$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" -N -s -e "SELECT COUNT(*) FROM lotto_winning_records;")
+              echo "Backup Timestamp : $(date -u '+%Y-%m-%d %H:%M:%S UTC')" > "$META_FILE"
+              echo "Backed Up Rows   : ${ROW_COUNT} rows" >> "$META_FILE"
+              echo "Backup File Size : $(wc -c < "$BACKUP_FILE") bytes" >> "$META_FILE"
+
+              echo "[2/3] Backup completed successfully! Summary:"
+              cat "$META_FILE"
+              echo "[3/3] Files stored in PersistentVolume (/backup):"
+              ls -lh /backup
+          volumeMounts:
+            - name: backup-storage
+              mountPath: /backup
+      volumes:
+        - name: backup-storage
+          persistentVolumeClaim:
+            claimName: lotto-backup-pvc

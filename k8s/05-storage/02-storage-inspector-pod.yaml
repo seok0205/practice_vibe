@@ -1,0 +1,106 @@
+# ==============================================================================
+# [파일 목적]
+# 1. `01-static-pv-and-backup.yaml`의 백업 Job이 종료된 후에도, 완전히 다른 새로운 파드(`backup-inspector`)에서
+#    동일한 PVC(`lotto-backup-pvc`)를 마운트했을 때 백업된 `.sql` 파일이 그대로 남아 있는지 검증합니다.
+# 2. 하나의 파드 안에서 두 컨테이너가 파일시스템을 실시간으로 공유하는 `emptyDir` 볼륨과,
+#    `ConfigMap`의 설정값들을 환경변수가 아닌 **설정 파일(`/etc/lotto-config/*`)**로 마운트하는 기법을 실습합니다.
+#
+# [CKA 시험 단골 출제 포인트]
+# - 하나의 파드 내 메인 컨테이너와 사이드카(Sidecar) 컨테이너가 로그 파일이나 임시 데이터를 공유할 때는
+#   항상 **`emptyDir: {}`** 볼륨을 양쪽 컨테이너의 `volumeMounts`에 연결합니다!
+# - `persistentVolumeClaim`은 **`readOnly: true`** 옵션을 주면 실수로 검증 파드에서 백업 원본 파일을
+#   삭제하거나 변조하는 것을 원천 차단할 수 있습니다.
+# ==============================================================================
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: backup-inspector
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: backup-inspector
+spec:
+  # 백업 PV(hostPath)가 위치한 동일한 노드(vibe-cluster-worker2, tier=backend)에 스케줄링되도록 보장!
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: tier
+                operator: In
+                values:
+                  - backend
+  tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "database"
+      effect: "NoSchedule"
+
+  containers:
+    # --------------------------------------------------------------------------
+    # 컨테이너 1: 메인 검증 컨테이너
+    # 역할: PVC(/mnt/backup-archive)에서 백업 메타데이터를 읽어 emptyDir(/shared/report.log)에 기록합니다.
+    # --------------------------------------------------------------------------
+    - name: verifier
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          echo "=== [Verifier Container] PVC 및 ConfigMap 볼륨 마운트 검증 ===" > /shared/report.log
+          echo "1. ConfigMap 파일 마운트(/etc/lotto-config/APP_VERSION): $(cat /etc/lotto-config/APP_VERSION)" >> /shared/report.log
+          echo "2. PVC 백업 요약 파일(/mnt/backup-archive/last_backup_info.txt):" >> /shared/report.log
+          if [ -f /mnt/backup-archive/last_backup_info.txt ]; then
+            cat /mnt/backup-archive/last_backup_info.txt >> /shared/report.log
+          else
+            echo "아직 백업 파일이 없습니다." >> /shared/report.log
+          fi
+          cat /shared/report.log
+          sleep 3600
+      volumeMounts:
+        # 1) 정적 PVC 마운트 (읽기 전용으로 마운트하여 백업 원본 손상 방지)
+        - name: backup-pvc-vol
+          mountPath: /mnt/backup-archive
+          readOnly: true
+        # 2) ConfigMap을 디렉토리 내 파일들로 마운트 (각 Key가 파일명이 되고 Value가 파일 내용이 됨)
+        - name: configmap-file-vol
+          mountPath: /etc/lotto-config
+          readOnly: true
+        # 3) 옆에 있는 sidecar 컨테이너와 실시간으로 파일을 공유하는 emptyDir 볼륨
+        - name: shared-cache-vol
+          mountPath: /shared
+
+    # --------------------------------------------------------------------------
+    # 컨테이너 2: 사이드카(Sidecar) 로그 리더 컨테이너
+    # 역할: verifier 컨테이너가 `/shared/report.log`에 쓴 파일을 공유 볼륨(`emptyDir`)에서 읽어들입니다.
+    # --------------------------------------------------------------------------
+    - name: sidecar-reader
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          sleep 2
+          echo "=== [Sidecar Container] emptyDir 공유 볼륨(/var/log/shared/report.log) 읽기 성공! ==="
+          cat /var/log/shared/report.log
+          sleep 3600
+      volumeMounts:
+        # 동일한 'shared-cache-vol'(emptyDir) 볼륨을 사이드카에서는 다른 경로(/var/log/shared)로 마운트 가능!
+        - name: shared-cache-vol
+          mountPath: /var/log/shared
+
+  # ----------------------------------------------------------------------------
+  # 파드에서 사용할 3가지 종류의 Volume 정의 (PVC vs ConfigMap vs emptyDir)
+  # ----------------------------------------------------------------------------
+  volumes:
+    - name: backup-pvc-vol
+      persistentVolumeClaim:
+        claimName: lotto-backup-pvc
+    - name: configmap-file-vol
+      configMap:
+        name: vibe-lotto-config
+    - name: shared-cache-vol
+      # emptyDir: 파드가 노드에 생성될 때 빈 디렉토리로 만들어지고, 파드가 삭제되면 함께 사라지는 임시 공유 볼륨
+      emptyDir: {}

@@ -60,10 +60,13 @@ spec:
         - podSelector:
             matchLabels:
               job-name: lotto-stats-report
-        # 허용 그룹 3: Module 3에서 만든 2분 주기 감사 CronJob 파드 ('app.kubernetes.io/name: lotto-periodic-audit')
+        # 허용 그룹 3: Module 3 & Module 5의 배치/백업 Job 및 CronJob 파드 ('tier: batch-audit' 또는 'app.kubernetes.io/name: lotto-periodic-audit')
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: lotto-periodic-audit
+        - podSelector:
+            matchLabels:
+              tier: batch-audit
       # 허용할 프로토콜 및 포트 번호 (TCP 3306 포트만 개방)
       ports:
         - protocol: TCP
