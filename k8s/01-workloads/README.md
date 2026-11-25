@@ -23,10 +23,10 @@ flowchart LR
         Config -.->|환경변수 주입| Pod2
         Config -.->|환경변수 주입| MySQLPod
 
-        Pod1 -->|CoreDNS: mysql-service:3306| MySQLSvc["Service: mysql-service\n(ClusterIP: 3306)"]
-        Pod2 -->|CoreDNS: mysql-service:3306| MySQLSvc
+        Pod1 -->|"CoreDNS: mysql-service:3306"| MySQLSvc["Service: mysql-service\n(ClusterIP: 3306)"]
+        Pod2 -->|"CoreDNS: mysql-service:3306"| MySQLSvc
         MySQLSvc --> MySQLPod["Pod: mysql (MySQL 8.0)"]
-        MySQLPod <-->|마운트 (/var/lib/mysql)| PVC[("PVC: mysql-pvc (1Gi)")]
+        MySQLPod <-->|"마운트 (/var/lib/mysql)"| PVC[("PVC: mysql-pvc (1Gi)")]
     end
 ```
 

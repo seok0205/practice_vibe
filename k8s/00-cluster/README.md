@@ -16,7 +16,7 @@ Docker만 사용할 때는 단일 서버에서 `docker run` 명령어로 컨테�
 
 ```mermaid
 flowchart TB
-    User["사용자 / 관리자 (kubectl)"] -->|1. YAML 제출 (HTTPS/REST)| API
+    User["사용자 / 관리자 (kubectl)"] -->|"1. YAML 제출 (HTTPS/REST)"| API
 
     subgraph ControlPlane["Control Plane (마스터 노드)"]
         API["kube-apiserver\n(유일한 통신 창구 / 인증·인가·검증)"]

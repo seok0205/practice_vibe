@@ -11,21 +11,21 @@
 
 ```mermaid
 flowchart LR
-    User["외부 사용자 브라우저\nhttp://localhost\n또는 http://lotto.vibe.local"] -->|포트 80 (extraPortMappings)| IngressCtrl["NGINX Ingress Controller\n(Control Plane 노드의 80 포트 수신)"]
+    User["외부 사용자 브라우저\nhttp://localhost\n또는 http://lotto.vibe.local"] -->|"포트 80 (extraPortMappings)"| IngressCtrl["NGINX Ingress Controller\n(Control Plane 노드의 80 포트 수신)"]
 
     subgraph Namespace["Namespace: vibe-lotto"]
-        IngressRule["Ingress 리소스\n(01-ingress.yaml 라우팅 규칙)"] -.->|규칙 등록| IngressCtrl
-        IngressCtrl -->|L7 Host/Path 라우팅| AppSvc["Service: vibe-lotto-service\n(ClusterIP: 80)"]
-        AppSvc -->|L4 로드밸런싱| Pod1["Pod 1: vibe-lotto-app (:8000)"]
-        AppSvc -->|L4 로드밸런싱| Pod2["Pod 2: vibe-lotto-app (:8000)"]
+        IngressRule["Ingress 리소스\n(01-ingress.yaml 라우팅 규칙)"] -.->|"규칙 등록"| IngressCtrl
+        IngressCtrl -->|"L7 Host/Path 라우팅"| AppSvc["Service: vibe-lotto-service\n(ClusterIP: 80)"]
+        AppSvc -->|"L4 로드밸런싱"| Pod1["Pod 1: vibe-lotto-app (:8000)"]
+        AppSvc -->|"L4 로드밸런싱"| Pod2["Pod 2: vibe-lotto-app (:8000)"]
 
         subgraph Firewall["NetworkPolicy (02-network-policy.yaml)"]
             MySQLPod["Pod: mysql (:3306)"]
         end
 
-        Pod1 -->|✅ 허용 (tier=backend)| MySQLPod
-        Pod2 -->|✅ 허용 (tier=backend)| MySQLPod
-        HackerPod["비인가 Pod (tier 없음)"] -.->|❌ NetworkPolicy 차단!| MySQLPod
+        Pod1 -->|"✅ 허용 (tier=backend)"| MySQLPod
+        Pod2 -->|"✅ 허용 (tier=backend)"| MySQLPod
+        HackerPod["비인가 Pod (tier 없음)"] -.->|"❌ NetworkPolicy 차단!"| MySQLPod
     end
 ```
 

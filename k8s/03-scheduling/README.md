@@ -18,8 +18,8 @@ flowchart LR
 
     subgraph Taint["2. Taint & Toleration (노드가 자격 없는 파드를 거부)"]
         Node2_T["Worker 2\n(Taint: dedicated=database:NoSchedule)"]
-        PodA_T["MySQL Pod\n(Toleration: dedicated=database)"] -->|✅ 통행증 있음 (배치 허용)| Node2_T
-        OtherPod_T["일반 Pod\n(Toleration 없음)"] -.->|❌ 진입 차단!| Node2_T
+        PodA_T["MySQL Pod\n(Toleration: dedicated=database)"] -->|"✅ 통행증 있음 (배치 허용)"| Node2_T
+        OtherPod_T["일반 Pod\n(Toleration 없음)"] -.->|"❌ 진입 차단!"| Node2_T
     end
 ```
 

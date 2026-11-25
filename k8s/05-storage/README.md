@@ -18,8 +18,8 @@ flowchart TB
     end
 
     subgraph Static["2. 정적 프로비저닝 (이번 Module 5의 lotto-backup-pv)"]
-        Admin["클러스터 관리자"] -->|1. PV를 수동으로 먼저 생성| PV2["정적 PV: lotto-backup-pv\n(500Mi, storageClassName: manual\nReclaimPolicy: Retain)"]
-        PVC2["사용자가 PVC 생성\n(lotto-backup-pvc, 200Mi\nstorageClassName: manual)"] <-->|2. 조건이 맞으면 1:1 Bound!| PV2
+        Admin["클러스터 관리자"] -->|"1. PV를 수동으로 먼저 생성"| PV2["정적 PV: lotto-backup-pv\n(500Mi, storageClassName: manual\nReclaimPolicy: Retain)"]
+        PVC2["사용자가 PVC 생성\n(lotto-backup-pvc, 200Mi\nstorageClassName: manual)"] <-->|"2. 조건이 맞으면 1:1 Bound!"| PV2
     end
 ```
 
