@@ -1,0 +1,143 @@
+# ==============================================================================
+# [파일 목적]
+# Kubernetes API 서버의 접근 제어 시스템인 **RBAC(Role-Based Access Control)**의 4대 핵심 리소스
+# (`ServiceAccount`, `Role`, `RoleBinding`, `ClusterRole`, `ClusterRoleBinding`)를 구축하여
+# 최소 권한 원칙(Principle of Least Privilege)을 실습하는 매니페스트입니다.
+#
+# [아키텍처 내 역할 & 왜 필요한가?]
+# - Kubernetes에서 파드를 만들 때 `serviceAccountName`을 생략하면 해당 네임스페이스의
+#   `default` ServiceAccount가 자동 할당됩니다.
+# - 만약 애플리케이션 파드가 클러스터 내부에서 현재 떠 있는 백엔드 파드 목록이나 배포 상태,
+#   최근 이벤트 로그를 자체 진단(Self-Diagnostics)해야 할 때, 모든 권한을 가진 `cluster-admin`을
+#   부여하면 파드가 해킹당했을 때 클러스터 전체가 장악됩니다.
+# - 따라서 **"딱 필요한 리소스(`pods`, `deployments`, `services`, `jobs`)에 대해 읽기 전용(`get`, `list`, `watch`)만
+#   허용하고, `secrets` 조회나 리소스 삭제(`delete`)는 절대 불가"**하도록 정밀한 권한을 설계합니다.
+#
+# [앞선 Module 0 ~ 5와의 호환성 설계 (Zero-Conflict Design)]
+# - 이 파일은 권한 정의(RBAC) 리소스만 생성하므로 기존의 `mysql`, `vibe-lotto-app`, `Ingress`,
+#   `NetworkPolicy`, `PV/PVC`에 어떠한 중단이나 충돌도 일으키지 않습니다.
+#
+# [CKA 시험 1순위 출제 포인트 (매우 중요!)]
+# 1. `Role` + `RoleBinding` vs `ClusterRole` + `ClusterRoleBinding`:
+#    - `Role` / `RoleBinding`: **특정 네임스페이스(`vibe-lotto`) 내부**의 리소스 권한만 부여
+#    - `ClusterRole` / `ClusterRoleBinding`: **클러스터 전역**(모든 네임스페이스 또는 `nodes`, `persistentvolumes` 같은 비-네임스페이스 리소스) 권한 부여
+#    - (응용) `ClusterRole`을 만들고 특정 네임스페이스에서 `RoleBinding`으로 묶으면,
+#      공통 권한 템플릿을 해당 네임스페이스에만 국한해서 재사용할 수 있습니다!
+# 2. `apiGroups` 매핑 암기 (틀리면 권한이 안 먹힘!):
+#    - 코어 리소스 (`pods`, `services`, `configmaps`, `secrets`, `nodes`, `persistentvolumes`): **`""`** (빈 문자열)
+#    - 워크로드 (`deployments`, `daemonsets`, `statefulsets`, `replicasets`): **`"apps"`**
+#    - 배치 (`jobs`, `cronjobs`): **`"batch"`**
+#    - 네트워크 (`ingresses`, `networkpolicies`): **`"networking.k8s.io"`**
+# 3. 명령형(Imperative) 생성 단축어 (CKA 시험장 시간 단축 필수!):
+#    - `kubectl create sa lotto-auditor-sa -n vibe-lotto`
+#    - `kubectl create role lotto-readonly-role --verb=get,list,watch --resource=pods,services,deployments.apps -n vibe-lotto`
+#    - `kubectl create rolebinding lotto-readonly-binding --role=lotto-readonly-role --serviceaccount=vibe-lotto:lotto-auditor-sa -n vibe-lotto`
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. ServiceAccount (파드에게 부여할 전용 신분증/ID)
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lotto-auditor-sa
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: lotto-auditor-sa
+    app.kubernetes.io/part-of: vibe-lotto
+---
+# ------------------------------------------------------------------------------
+# 2. Role (네임스페이스 내부 권한 정의서: "무엇을 할 수 있는가?")
+# 주의: 보안을 위해 'secrets' 리소스와 'create/update/delete' 동사(verbs)는 의도적으로 제외했습니다!
+# ------------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lotto-readonly-role
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: lotto-readonly-role
+rules:
+  # 규칙 1: Core API 그룹("")의 파드, 파드 로그, 서비스, 컨피그맵, PVC 읽기 허용 (Secret은 제외!)
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - configmaps
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch"]
+
+  # 규칙 2: 'apps' API 그룹의 Deployment, ReplicaSet, DaemonSet 상태 조회 허용
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+
+  # 규칙 3: 'batch' API 그룹의 Job 및 CronJob(Module 3 & 5) 상태 조회 허용
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+---
+# ------------------------------------------------------------------------------
+# 3. RoleBinding (ServiceAccount와 Role을 연결하는 임명장: "누구에게 이 Role을 줄 것인가?")
+# ------------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lotto-readonly-binding
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: lotto-readonly-binding
+subjects:
+  # 권한을 부여받을 주체 (User, Group, 또는 ServiceAccount)
+  - kind: ServiceAccount
+    name: lotto-auditor-sa
+    namespace: vibe-lotto
+roleRef:
+  # 연결할 Role 정보 (주의: 한 번 생성된 RoleBinding의 roleRef는 수정할 수 없으며, 바꾸려면 삭제 후 재생성해야 합니다!)
+  kind: Role
+  name: lotto-readonly-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# ------------------------------------------------------------------------------
+# 4. ClusterRole (클러스터 전역 리소스인 Node 및 PersistentVolume 조회 권한)
+# 왜 ClusterRole이 필요한가?
+# 'nodes'와 'persistentvolumes'(Module 5의 lotto-backup-pv)는 특정 네임스페이스에 속하지 않는
+# 클러스터 전역(Cluster-scoped) 리소스이므로 일반 Role로는 절대 권한을 줄 수 없습니다!
+# ------------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lotto-cluster-node-pv-reader
+  labels:
+    app.kubernetes.io/name: lotto-cluster-node-pv-reader
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - persistentvolumes
+    verbs: ["get", "list", "watch"]
+---
+# ------------------------------------------------------------------------------
+# 5. ClusterRoleBinding (lotto-auditor-sa에게 클러스터 노드/PV 읽기 권한 연결)
+# ------------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lotto-cluster-node-pv-reader-binding
+  labels:
+    app.kubernetes.io/name: lotto-cluster-node-pv-reader-binding
+subjects:
+  - kind: ServiceAccount
+    name: lotto-auditor-sa
+    namespace: vibe-lotto
+roleRef:
+  kind: ClusterRole
+  name: lotto-cluster-node-pv-reader
+  apiGroup: rbac.authorization.k8s.io

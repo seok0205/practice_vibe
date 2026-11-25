@@ -1,0 +1,205 @@
+# ==============================================================================
+# [파일 목적]
+# 1. `01-rbac.yaml`에서 만든 최소 권한 `ServiceAccount` (`lotto-auditor-sa`)를
+#    우리의 메인 애플리케이션(`vibe-lotto-app`)과 보안 감사 파드(`rbac-security-auditor`)에 적용합니다.
+# 2. 컨테이너 보안의 핵심인 **`SecurityContext`**(Pod 레벨 + Container 레벨)를 강화하여
+#    Root 권한 탈취(`allowPrivilegeEscalation: false`), Linux Capabilities 제거(`drop: ["ALL"]`),
+#    Seccomp 시스템 콜 필터링(`RuntimeDefault`)을 적용합니다.
+#
+# [앞선 Module 0 ~ 5와의 완벽한 호환성 유지 (Zero-Conflict Design)]
+# - `vibe-lotto-app` Deployment를 업데이트할 때:
+#   1) Module 2의 `initContainers (wait-for-mysql)`, `ConfigMap/Secret`, `liveness/readinessProbe` 그대로 유지
+#   2) Module 3의 `podAntiAffinity` (워커 노드 분산 배치) 그대로 유지
+#   3) Module 4의 `Ingress` 및 `NetworkPolicy` 통과용 라벨(`tier: backend`) 그대로 유지
+#   4) 여기에 **`serviceAccountName: lotto-auditor-sa`**와 **강화된 Container `securityContext`**만 무중단 롤링 업데이트로 추가합니다!
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Vibe Lotto App Deployment (ServiceAccount + Hardened SecurityContext 적용)
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vibe-lotto-app
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: vibe-lotto-app
+    tier: backend
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vibe-lotto-app
+      tier: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vibe-lotto-app
+        # Module 4 NetworkPolicy(mysql-access-policy) 및 Service 연결을 위한 필수 라벨 유지!
+        tier: backend
+    spec:
+      # ------------------------------------------------------------------------
+      # [Module 6 핵심 1] 전용 최소 권한 ServiceAccount 할당
+      # 생략 시 'default' ServiceAccount가 사용됩니다.
+      # ------------------------------------------------------------------------
+      serviceAccountName: lotto-auditor-sa
+
+      # ------------------------------------------------------------------------
+      # [Module 6 핵심 2] Pod-level SecurityContext
+      # 파드 내 모든 컨테이너의 프로세스 UID/GID 및 볼륨 파일 소유권 그룹(fsGroup)을 비특권 유저(10001)로 강제합니다.
+      # ------------------------------------------------------------------------
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        # seccompProfile: 컨테이너가 호스트 Linux 커널에 위험한 시스템 콜(syscall)을 호출하지 못하도록
+        # 컨테이너 런타임의 기본 보안 프로파일(RuntimeDefault)을 적용합니다. (CKA/CKS 중요 옵션)
+        seccompProfile:
+          type: RuntimeDefault
+
+      # [Module 3 호환] 파드 간 상호 분산 배치(PodAntiAffinity) 유지
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - vibe-lotto-app
+                topologyKey: "kubernetes.io/hostname"
+
+      # [Module 2 호환] MySQL 준비 대기 InitContainer 유지
+      initContainers:
+        - name: wait-for-mysql
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -v -w2 mysql-service 3306; do
+                echo "Waiting for MySQL..."
+                sleep 2
+              done
+          # InitContainer에도 동일한 최소 권한 SecurityContext 적용
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+      containers:
+        - name: vibe-lotto
+          image: vibe-lotto:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          # --------------------------------------------------------------------
+          # [Module 6 핵심 3] Container-level SecurityContext
+          # - allowPrivilegeEscalation: false -> setuid 바이너리 등을 통한 root 권한 상승 원천 차단
+          # - capabilities.drop: ["ALL"] -> 리눅스 커널 특권(NET_RAW, SYS_ADMIN 등)을 모두 제거
+          # --------------------------------------------------------------------
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: vibe-lotto-config
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vibe-lotto-secret
+                  key: DB_PASSWORD
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+# ------------------------------------------------------------------------------
+# 2. RBAC & SecurityContext 실시간 검증용 보안 감사 파드 (rbac-security-auditor)
+# 역할: 파드 내부에 자동 마운트된 ServiceAccount JWT 토큰(`/var/run/secrets/kubernetes.io/serviceaccount/token`)을
+#       사용해 K8s API 서버에 실제로 요청을 날려보고:
+#       1) 허용된 `pods` 조회는 성공(Allowed)하는지,
+#       2) 금지된 `secrets` 조회는 거부(Forbidden 403)되는지,
+#       3) 프로세스가 실제로 UID 10001(Non-root)로 실행 중인지 스스로 증명합니다!
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rbac-security-auditor
+  namespace: vibe-lotto
+  labels:
+    app.kubernetes.io/name: rbac-security-auditor
+spec:
+  serviceAccountName: lotto-auditor-sa
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: kubectl-auditor
+      image: bitnami/kubectl:latest
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      command:
+        - sh
+        - -c
+        - |
+          echo "================================================================"
+          echo " [Module 6 Security Audit] ServiceAccount & SecurityContext 검증"
+          echo "================================================================"
+          echo "[1] 현재 프로세스 실행 유저(ID) 확인 (Non-root 10001 검증):"
+          id
+          echo ""
+          echo "[2] 허용된 권한 테스트: vibe-lotto 네임스페이스의 Pod 목록 조회 (Expected: SUCCESS)"
+          kubectl get pods -n vibe-lotto
+          echo ""
+          echo "[3] 클러스터 전역 ClusterRole 테스트: PersistentVolume 조회 (Expected: SUCCESS)"
+          kubectl get pv
+          echo ""
+          echo "[4] 차단된 권한 테스트: Secret(DB 비밀번호) 조회 시도 (Expected: Forbidden 차단!)"
+          kubectl get secrets -n vibe-lotto || echo "✅ 정상 차단됨! (lotto-auditor-sa는 Secret을 볼 수 없습니다)"
+          echo "================================================================"
+          sleep 3600
